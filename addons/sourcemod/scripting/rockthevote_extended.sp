@@ -46,12 +46,12 @@
 #tryinclude <PlayerManager>
 #define REQUIRE_PLUGIN
 
-#define RTVE_VERSION "1.11.1"
+#define RTVE_VERSION "1.11.3"
 
 public Plugin myinfo =
 {
 	name = "Rock The Vote Extended",
-	author = "Powerlord and AlliedModders LLC",
+	author = "Powerlord and AlliedModders LLC, +SyntX",
 	description = "Provides RTV Map Voting",
 	version = RTVE_VERSION,
 	url = "https://forums.alliedmods.net/showthread.php?t=156974"
@@ -102,6 +102,7 @@ public void OnPluginStart()
 	RegAdminCmd("sm_disablertv", Command_DisableRTV, ADMFLAG_CHANGEMAP, "Disable the RTV command");
 	RegAdminCmd("sm_enablertv", Command_EnableRTV, ADMFLAG_CHANGEMAP, "Enable the RTV command");
 	RegAdminCmd("sm_debugrtv", Command_DebugRTV, ADMFLAG_CHANGEMAP, "Check the current RTV calculation");
+	RegConsoleCmd("cancelrtv", Command_CancelRTV, "Cancels your Rock the Vote request."); // Untested, Test yourself!
 
 	HookEvent("player_team", OnPlayerChangedTeam, EventHookMode_PostNoCopy);
 
@@ -181,69 +182,60 @@ public void OnPlayerChangedTeam(Handle event, const char[] name, bool dontBroadc
 
 void UpdateRTV()
 {
-	g_Voters = 0;
-	int iVotersSteam;
-	int iVotersNoSteam; 
+    g_Voters = 0;
+    int iVotersSteam = 0;
 
-	for (int i=1; i<=MaxClients; i++)
-	{
-		if (IsClientInGame(i) && !IsFakeClient(i))
-		{
-			if (g_bPlugin_AFK)
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        // Check if the client is in-game and not a bot
+        if (IsClientInGame(i) && !IsFakeClient(i))
+        {
+           // Inside the loop where we're checking each client
+			char authID[32];
+			GetClientAuthId(i, AuthId_Steam2, authID, sizeof(authID));
+	
+			// Check if the player has a Steam ID (ignores bots and non-Steam players)
+			if (authID[0] != '\0' && StrContains(authID, "STEAM_", false) != -1)
 			{
+    			iVotersSteam++;
+       
+                if (g_bPlugin_AFK)
+                {
 #if defined _AFKManager_Included
-				int clientIdleTime = GetClientIdleTime(i);
+                    int clientIdleTime = GetClientIdleTime(i);
 #else
-				int clientIdleTime = 0;
+                    int clientIdleTime = 0;
 #endif
-				if (clientIdleTime >= g_Cvar_AFKTime.IntValue)
-					continue;
-			}
+                    if (clientIdleTime >= g_Cvar_AFKTime.IntValue)
+                        continue;
+                }
+            }
+        }
+    }
 
-			if (g_bPlugin_PM)
-			{
-#if defined _PlayerManager_included
-				if (PM_IsPlayerSteam(i))
-					iVotersSteam++;
-				else
-					iVotersNoSteam++;
-#endif
-			}
-		}
-	}
+    g_Voters = iVotersSteam;
+    g_VotesNeeded = RoundToCeil(float(g_Voters) * g_Cvar_Needed.FloatValue);
 
-	if (g_bPlugin_PM)
-	{
-		g_Voters = iVotersSteam + iVotersNoSteam;
-		int iVotesNeededSteam = RoundToFloor(float(iVotersSteam) * GetConVarFloat(g_Cvar_Needed));
-		int iVotesNeededNoSteam = RoundToFloor(float(iVotersNoSteam) * GetConVarFloat(g_Cvar_Needed_NoSteam));
-		g_VotesNeeded = iVotesNeededSteam + iVotesNeededNoSteam;
-	}
-	else
-	{
-		g_Voters = GetTeamClientCount(2) + GetTeamClientCount(3);
-		g_VotesNeeded = RoundToCeil(float(g_Voters) * g_Cvar_Needed.FloatValue);
-	}
+    // Ensure minimum votes needed is at least 1
+    if (g_VotesNeeded < 1)
+    {
+        g_VotesNeeded = 1;
+    }
 
-	if (g_VotesNeeded < 1)
-	{
-		g_VotesNeeded = 1;
-	}
+    if (!g_CanRTV)
+    {
+        return;
+    }
 
-	if (!g_CanRTV)
-	{
-		return;
-	}
+    if (g_Votes && g_Voters && g_Votes >= g_VotesNeeded && RTVAllowed())
+    {
+        if (g_Cvar_RTVPostVoteAction.IntValue == 1 && HasEndOfMapVoteFinished())
+        {
+            return;
+        }
 
-	if (g_Votes && g_Voters && g_Votes >= g_VotesNeeded && RTVAllowed())
-	{
-		if (g_Cvar_RTVPostVoteAction.IntValue == 1 && HasEndOfMapVoteFinished())
-		{
-			return;
-		}
-
-		StartRTV();
-	}
+        StartRTV();
+    }
 }
 
 public void OnClientSayCommand_Post(int client, const char[] command, const char[] sArgs)
@@ -277,42 +269,52 @@ public Action Command_RTV(int client, int args)
 
 void AttemptRTV(int client)
 {
-	if (!RTVAllowed() || (g_Cvar_RTVPostVoteAction.IntValue == 1 && HasEndOfMapVoteFinished()))
-	{
-		CReplyToCommand(client, "{green}[RTVE]{default} %t", "RTV Not Allowed");
-		return;
-	}
+    if (!RTVAllowed() || (g_Cvar_RTVPostVoteAction.IntValue == 1 && HasEndOfMapVoteFinished()))
+    {
+        CReplyToCommand(client, "{green}[RTVE]{default} %t", "RTV Not Allowed");
+        return;
+    }
 
-	if (!CanMapChooserStartVote())
-	{
-		CReplyToCommand(client, "{green}[RTVE]{default} %t", "RTV Started");
-		return;
-	}
+    if (!CanMapChooserStartVote())
+    {
+        CReplyToCommand(client, "{green}[RTVE]{default} %t", "RTV Started");
+        return;
+    }
 
-	if (GetClientCount(true) < g_Cvar_MinPlayers.IntValue)
-	{
-		CReplyToCommand(client, "{green}[RTVE]{default} %t", "Minimal Players Not Met");
-		return;
-	}
+    // Ensure that minimum players required is based only on real players
+    int realPlayerCount = 0;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && !IsFakeClient(i))
+        {
+            realPlayerCount++;
+        }
+    }
 
-	if (g_Voted[client])
-	{
-		CReplyToCommand(client, "{green}[RTVE]{default} %t", "Already Voted", g_Votes, g_VotesNeeded);
-		return;
-	}
+    if (realPlayerCount < g_Cvar_MinPlayers.IntValue)
+    {
+        CReplyToCommand(client, "{green}[RTVE]{default} %t", "Minimal Players Not Met");
+        return;
+    }
 
-	char name[MAX_NAME_LENGTH];
-	GetClientName(client, name, sizeof(name));
+    if (g_Voted[client])
+    {
+        CReplyToCommand(client, "{green}[RTVE]{default} %t", "Already Voted", g_Votes, g_VotesNeeded);
+        return;
+    }
 
-	g_Votes++;
-	g_Voted[client] = true;
+    char name[MAX_NAME_LENGTH];
+    GetClientName(client, name, sizeof(name));
 
-	CPrintToChatAll("{green}[RTVE]{default} %t", "RTV Requested", name, g_Votes, g_VotesNeeded);
+    g_Votes++;
+    g_Voted[client] = true;
 
-	if (g_Votes >= g_VotesNeeded)
-	{
-		StartRTV();
-	}
+    CPrintToChatAll("{green}[RTVE]{default} %t", "RTV Requested", name, g_Votes, g_VotesNeeded);
+
+    if (g_Votes >= g_VotesNeeded)
+    {
+        StartRTV();
+    }
 }
 
 public Action Timer_DelayRTV(Handle timer)
@@ -518,6 +520,32 @@ public Action Command_DebugRTV(int client, int args)
 
 	return Plugin_Handled;
 }
+
+public Action Command_CancelRTV(int client, int args)
+{
+    if (!g_CanRTV || !client)
+    {
+        return Plugin_Handled;
+    }
+
+    if (!g_Voted[client])
+    {
+        CReplyToCommand(client, "{green}[RTVE]{default} You have not voted for Rock the Vote.");
+        return Plugin_Handled;
+    }
+
+    // Remove the player's vote
+    g_Voted[client] = false;
+    g_Votes--;
+
+    char name[MAX_NAME_LENGTH];
+    GetClientName(client, name, sizeof(name));
+    
+    CPrintToChatAll("{green}[RTVE]{default} %t has canceled their Rock the Vote request. Current votes: %d, Required votes: %d", name, g_Votes, g_VotesNeeded);
+
+    return Plugin_Handled;
+}
+
 
 bool RTVAllowed()
 {
