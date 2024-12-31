@@ -46,7 +46,7 @@
 #tryinclude <PlayerManager>
 #define REQUIRE_PLUGIN
 
-#define RTVE_VERSION "1.11.3"
+#define RTVE_VERSION "1.11.5"
 
 public Plugin myinfo =
 {
@@ -102,6 +102,7 @@ public void OnPluginStart()
 	RegAdminCmd("sm_disablertv", Command_DisableRTV, ADMFLAG_CHANGEMAP, "Disable the RTV command");
 	RegAdminCmd("sm_enablertv", Command_EnableRTV, ADMFLAG_CHANGEMAP, "Enable the RTV command");
 	RegAdminCmd("sm_debugrtv", Command_DebugRTV, ADMFLAG_CHANGEMAP, "Check the current RTV calculation");
+	RegAdminCmd("sm_removertv", Command_RemoveRTV, ADMFLAG_CHANGEMAP, "Force remove client rock the vote."); // Untested, Test yourself!!
 	RegConsoleCmd("cancelrtv", Command_CancelRTV, "Cancels your Rock the Vote request."); // Untested, Test yourself!
 
 	HookEvent("player_team", OnPlayerChangedTeam, EventHookMode_PostNoCopy);
@@ -269,15 +270,10 @@ public Action Command_RTV(int client, int args)
 
 void AttemptRTV(int client)
 {
-    if (!RTVAllowed() || (g_Cvar_RTVPostVoteAction.IntValue == 1 && HasEndOfMapVoteFinished()))
+    // Remove any restrictions for RTV, allow at any time
+    if (!RTVAllowed())
     {
         CReplyToCommand(client, "{green}[RTVE]{default} %t", "RTV Not Allowed");
-        return;
-    }
-
-    if (!CanMapChooserStartVote())
-    {
-        CReplyToCommand(client, "{green}[RTVE]{default} %t", "RTV Started");
         return;
     }
 
@@ -316,6 +312,8 @@ void AttemptRTV(int client)
         StartRTV();
     }
 }
+
+
 
 public Action Timer_DelayRTV(Handle timer)
 {
@@ -521,6 +519,137 @@ public Action Command_DebugRTV(int client, int args)
 	return Plugin_Handled;
 }
 
+
+// Function to find a player by name, SteamID, or userID
+int GetClientByTarget(int client, const char[] target)
+{
+    int targetClient = 0;
+
+    // Try to find by name
+    targetClient = FindClientByName(target);
+    if (targetClient != 0)
+        return targetClient;
+
+    // Try to find by SteamID
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && !IsFakeClient(i))
+        {
+            char steamID[64];
+            GetClientAuthString(i, steamID, sizeof(steamID));
+
+            if (StrEqual(steamID, target, false))
+            {
+                return i;
+            }
+        }
+    }
+
+    // Try to find by userID
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && !IsFakeClient(i))
+        {
+            int userID = GetClientUserId(i);
+
+            // Use StrToIntEx to convert target to an integer
+            if (StrToIntEx(target, userID))
+            {
+                return i;
+            }
+        }
+    }
+
+    return targetClient; // 0 means not found
+}
+
+// Command to force remove RTV from a specific player
+public Action Command_RemoveRTV(int client, int args)
+{
+    // Check if there is a player to remove RTV from
+    if (args < 1)
+    {
+        CReplyToCommand(client, "{red}[RTVE]{default} Usage: !removertv <player name/steamid/userid>");
+        return Plugin_Handled;
+    }
+
+    // Parse the argument to identify if it's a name, SteamID or UserID
+    char input[128];
+    GetCmdArgString(input, sizeof(input));
+
+    // Get the target player using GetClientByTarget
+    int targetPlayer = GetClientByTarget(client, input);
+
+    // Check if the player exists
+    if (targetPlayer == 0)
+    {
+        CReplyToCommand(client, "{red}[RTVE]{default} Player not found.");
+        return Plugin_Handled;
+    }
+
+    // Check if the target player has voted
+    if (!g_Voted[targetPlayer])
+    {
+        CReplyToCommand(client, "{red}[RTVE]{default} Player %t has not voted for Rock the Vote.", targetPlayer);
+        return Plugin_Handled;
+    }
+
+    // Remove the player's RTV vote
+    g_Voted[targetPlayer] = false;
+    g_Votes--;
+
+    // Notify the admin
+    char targetName[MAX_NAME_LENGTH];
+    GetClientName(targetPlayer, targetName, sizeof(targetName));
+    CReplyToCommand(client, "{green}[RTVE]{default} Removed %t's RTV vote. Current votes: %d, Required votes: %d", targetName, g_Votes, g_VotesNeeded);
+	
+	// Notify the player that their RTV has been removed
+    CReplyToCommand(targetPlayer, "{red}[RTVE]{default} Your Rock the Vote has been removed by an admin.");
+    // Optionally broadcast to everyone
+    CPrintToChatAll("{green}[RTVE]{default} %t's RTV vote has been removed by an admin. Current votes: %d, Required votes: %d", targetName, g_Votes, g_VotesNeeded);
+
+    return Plugin_Handled;
+}
+
+// Custom function to find a client by name
+int FindClientByName(const char[] name)
+{
+    int clientID = 0;  // Declare the variable at the start
+    char clientName[MAX_NAME_LENGTH];  // Declare clientName here
+
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && !IsFakeClient(i))
+        {
+            GetClientName(i, clientName, sizeof(clientName));
+
+            if (StrEqual(clientName, name, false))  // case-insensitive comparison
+            {
+                clientID = i;
+                break; // Exit the loop once the client is found
+            }
+        }
+    }
+    return clientID;  // Return the client ID if found, or 0 if not found
+}
+
+// Custom function to convert string to integer
+bool StrToIntEx(const char[] str, int &value)  // Use reference passing
+{
+    value = 0;  // Initialize value
+    int len = strlen(str);
+    int i;  // Declare loop variable here
+
+    for (i = 0; i < len; i++)
+    {
+        if (str[i] < '0' || str[i] > '9')
+            return false;
+
+        value = value * 10 + (str[i] - '0');
+    }
+    return true;
+}
+
 public Action Command_CancelRTV(int client, int args)
 {
     if (!g_CanRTV || !client)
@@ -530,7 +659,7 @@ public Action Command_CancelRTV(int client, int args)
 
     if (!g_Voted[client])
     {
-        CReplyToCommand(client, "{green}[RTVE]{default} You have not voted for Rock the Vote.");
+        CReplyToCommand(client, "{green}[RTVE]{default} You have not voted for Rock the Vote, so there's no vote to cancel.");
         return Plugin_Handled;
     }
 
@@ -541,7 +670,11 @@ public Action Command_CancelRTV(int client, int args)
     char name[MAX_NAME_LENGTH];
     GetClientName(client, name, sizeof(name));
     
+    // Notify all players
     CPrintToChatAll("{green}[RTVE]{default} %t has canceled their Rock the Vote request. Current votes: %d, Required votes: %d", name, g_Votes, g_VotesNeeded);
+
+    // Notify the client that their RTV was canceled
+    CPrintToChat(client, "{green}[RTVE]{default} Your Rock the Vote request has been successfully canceled.");
 
     return Plugin_Handled;
 }
